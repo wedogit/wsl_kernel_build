@@ -1,16 +1,34 @@
-name: Build Latest WSL2 Kernel
+name: Build WSL2 Kernel from Microsoft Repo
 
 on:
-  workflow_dispatch:           # 允许手动触发
-  schedule:
-    - cron: '0 0 * * 0'       # 每周日 00:00 自动运行（可选）
+  workflow_dispatch:        # 手动触发
+  #schedule:
+    #- cron: '0 0 * * 0'    # 每周日 00:00 自动构建（可选）
 
 jobs:
   build-wsl2-kernel:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (for script only)
+      - name: Check Server Performance(检查服务器性能)
+        run: |
+          echo "警告⚠"
+          echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+          echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
+          echo "--------------------------CPU信息--------------------------"
+          echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+          echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+          echo "--------------------------内存信息--------------------------"
+          echo "已安装内存详细信息："
+          echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
+          echo "--------------------------硬盘信息--------------------------"
+          echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+      - name: Checkout Microsoft WSL2-Linux-Kernel
         uses: actions/checkout@v4
+        with:
+          repository: microsoft/WSL2-Linux-Kernel
+          # 使用默认分支（当前为 linux-msft-wsl-6.6.y，未来微软可能更改，但会自动跟随）
+          ref: linux-msft-wsl-6.18.y
+          fetch-depth: 1
 
       - name: Install build dependencies
         run: |
@@ -20,67 +38,30 @@ jobs:
             kmod cpio dwarves zstd libncurses-dev \
             gcc-multilib xz-utils
 
-      - name: Get latest stable kernel version
-        id: kernel-version
+      - name: Configure kernel using Microsoft's WSL2 config
         run: |
-          # 从 kernel.org 获取最新稳定版本号
-          LATEST=$(curl -s https://www.kernel.org/releases.json | \
-                    jq -r '.releases[] | select(.stable==true) | .version' | \
-                    head -1)
-          echo "version=${LATEST}" >> $GITHUB_OUTPUT
-          echo "Latest stable kernel version: ${LATEST}"
-
-      - name: Download kernel source
-        run: |
-          VERSION=${{ steps.kernel-version.outputs.version }}
-          # 提取主版本号（如 6.x）
-          MAJOR=$(echo $VERSION | cut -d. -f1)
-          TARBALL="linux-${VERSION}.tar.xz"
-          URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
-          echo "Downloading ${URL}"
-          wget -q --show-progress "$URL"
-          tar -xf "${TARBALL}"
-          mv "linux-${VERSION}" kernel-source
-          echo "Kernel source prepared in kernel-source/"
-
-      - name: Fetch Microsoft WSL2 kernel config
-        run: |
-          # 使用微软官方 WSL2 内核配置作为基础
-          wget -O kernel-source/.config \
-            https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/linux-msft-wsl-6.6.y/Microsoft/config-wsl
-
-      - name: Update config for new kernel
-        working-directory: kernel-source
-        run: |
-          # 自动处理新增配置项（使用默认值）
+          # 复制微软提供的 WSL2 配置文件
+          cp Microsoft/config-wsl .config
+          # 处理新增配置项（采用默认值）
           make olddefconfig
-          # 可选：启用以太网虚拟化支持（WSL2 需要）
-          scripts/config --enable CONFIG_VIRTIO_NET
-          scripts/config --enable CONFIG_VIRTIO_BLK
-          scripts/config --enable CONFIG_VIRTIO_PCI
-          scripts/config --enable CONFIG_VIRTIO
-          # 开启 WSL 特定功能（微软配置中可能已包含，这里确保）
-          scripts/config --enable CONFIG_WSL
-          # 可选：启用更多网络设备支持
-          scripts/config --enable CONFIG_HYPERV_NET
-          # 再次整理依赖
-          make olddefconfig
+          # 可选：根据需要额外开启某些选项（例如调试支持，默认注释）
+          # scripts/config --enable CONFIG_DEBUG_INFO
+          # make olddefconfig
 
-      - name: Build kernel
-        working-directory: kernel-source
+      - name: Build kernel image (bzImage)
         run: |
-          # 使用所有 CPU 核心编译内核镜像
+          # 使用全部 CPU 核心编译内核镜像
           make -j$(nproc) bzImage
-          # 可选：编译模块（WSL2 通常不需要额外安装模块，但可保留）
+          # 编译内核模块（虽然 WSL2 通常不单独加载，但保留以备不时之需）
           make -j$(nproc) modules
-          # 复制内核镜像到便于上传的位置
-          cp arch/x86/boot/bzImage ../bzImage
-          cp .config ../kernel.config
+          # 将生成的内核镜像和配置文件复制到工作区根目录，方便上传
+          cp arch/x86/boot/bzImage .
+          cp .config kernel.config
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wsl2-kernel
+          name: wsl2-kernel-microsoft
           path: |
             bzImage
             kernel.config
