@@ -1,0 +1,87 @@
+name: Build Latest WSL2 Kernel
+
+on:
+  workflow_dispatch:           # 允许手动触发
+  schedule:
+    - cron: '0 0 * * 0'       # 每周日 00:00 自动运行（可选）
+
+jobs:
+  build-wsl2-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for script only)
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential flex bison libelf-dev libssl-dev bc \
+            kmod cpio dwarves zstd libncurses-dev \
+            gcc-multilib xz-utils
+
+      - name: Get latest stable kernel version
+        id: kernel-version
+        run: |
+          # 从 kernel.org 获取最新稳定版本号
+          LATEST=$(curl -s https://www.kernel.org/releases.json | \
+                    jq -r '.releases[] | select(.stable==true) | .version' | \
+                    head -1)
+          echo "version=${LATEST}" >> $GITHUB_OUTPUT
+          echo "Latest stable kernel version: ${LATEST}"
+
+      - name: Download kernel source
+        run: |
+          VERSION=${{ steps.kernel-version.outputs.version }}
+          # 提取主版本号（如 6.x）
+          MAJOR=$(echo $VERSION | cut -d. -f1)
+          TARBALL="linux-${VERSION}.tar.xz"
+          URL="https://cdn.kernel.org/pub/linux/kernel/v${MAJOR}.x/${TARBALL}"
+          echo "Downloading ${URL}"
+          wget -q --show-progress "$URL"
+          tar -xf "${TARBALL}"
+          mv "linux-${VERSION}" kernel-source
+          echo "Kernel source prepared in kernel-source/"
+
+      - name: Fetch Microsoft WSL2 kernel config
+        run: |
+          # 使用微软官方 WSL2 内核配置作为基础
+          wget -O kernel-source/.config \
+            https://raw.githubusercontent.com/microsoft/WSL2-Linux-Kernel/linux-msft-wsl-6.6.y/Microsoft/config-wsl
+
+      - name: Update config for new kernel
+        working-directory: kernel-source
+        run: |
+          # 自动处理新增配置项（使用默认值）
+          make olddefconfig
+          # 可选：启用以太网虚拟化支持（WSL2 需要）
+          scripts/config --enable CONFIG_VIRTIO_NET
+          scripts/config --enable CONFIG_VIRTIO_BLK
+          scripts/config --enable CONFIG_VIRTIO_PCI
+          scripts/config --enable CONFIG_VIRTIO
+          # 开启 WSL 特定功能（微软配置中可能已包含，这里确保）
+          scripts/config --enable CONFIG_WSL
+          # 可选：启用更多网络设备支持
+          scripts/config --enable CONFIG_HYPERV_NET
+          # 再次整理依赖
+          make olddefconfig
+
+      - name: Build kernel
+        working-directory: kernel-source
+        run: |
+          # 使用所有 CPU 核心编译内核镜像
+          make -j$(nproc) bzImage
+          # 可选：编译模块（WSL2 通常不需要额外安装模块，但可保留）
+          make -j$(nproc) modules
+          # 复制内核镜像到便于上传的位置
+          cp arch/x86/boot/bzImage ../bzImage
+          cp .config ../kernel.config
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wsl2-kernel
+          path: |
+            bzImage
+            kernel.config
+          retention-days: 7
